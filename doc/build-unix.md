@@ -85,33 +85,37 @@ intended as a faster alternative to IBD via the `loadtxoutset` RPC.
 > Unable to load UTXO snapshot: could not load BTX shielded snapshot section.
 > ```
 >
-> **Root cause:** the failure is in the v0.29.7 *loader*, not in the snapshot
-> file. The same error reproduces with the v0.29.5 release `snapshot.dat`
-> (different file, different SHA256, different base height — same error), which
-> rules out file corruption. `debug.log` reveals the actual failure point:
+> **Root cause:** the failure appears to be in the v0.29.7 *loader path*, not
+> in the current snapshot file. The same error reproduces with the v0.29.5
+> release `snapshot.dat` (different file, different SHA256, different base
+> height — same error), which rules out simple file corruption. `debug.log`
+> reveals the failing read:
 >
 > ```
 > [error] CollectShieldedAccountRegistryHistoryFromState:
 >         failed to read block <snapshot base blockhash>
 > ```
 >
-> `LoadShieldedSnapshotSection` (`src/validation.cpp`) tries to read the block
-> at the snapshot's base height from local storage in order to rebuild
-> derived shielded state. On a fresh node that hasn't yet IBD'd to the
-> snapshot's base height, that block isn't on disk, the read fails, and the
-> loader bails out. This makes the snapshot unloadable in exactly the case it
-> was designed for: bootstrapping a node that *doesn't yet* have the chain.
+> `LoadShieldedSnapshotSection` (`src/validation.cpp`) restores the serialized
+> shielded state from the snapshot file, but it also rebuilds recent shielded
+> account-registry root history from local block data. On a fresh node that has
+> the snapshot base header but not the corresponding block on disk, that
+> history rebuild fails and snapshot activation aborts. This makes the snapshot
+> unloadable in exactly the case it was designed for: bootstrapping a node that
+> *doesn't yet* have the chain.
 >
 > **Workaround:** run plain IBD (no special flag — just start `btxd` and let
 > it sync from peers). With 8+ peers, a fresh node reaches the current tip in
 > a few hours.
 >
-> **Fix direction (for upstream):** `LoadShieldedSnapshotSection` either needs
-> to skip the rebuild path when the referenced block isn't local, or the
-> snapshot serializer needs to embed the derived shielded state directly so
-> the loader doesn't have to back-reference the local chain. Reproduced on
-> three independent hosts (one Zen 4 EPYC, two Zen 3 EPYC) on Ubuntu 24.04
-> with v0.29.7 binaries built from source (CUDA backend enabled).
+> **Fix direction (for upstream):** the loader / restart path needs a safe way
+> to preserve or reconstruct the recent shielded account-registry history
+> required by validation, without assuming those blocks are already present
+> locally. A simple "skip the rebuild" shortcut is not sufficient, because
+> valid historical account-registry anchors and restart-time shielded-state
+> reconstruction still depend on that recent history. Reproduced on three
+> independent hosts (one Zen 4 EPYC, two Zen 3 EPYC) on Ubuntu 24.04 with
+> v0.29.7 binaries built from source (CUDA backend enabled).
 
 When the snapshot is fixed, the canonical loader call (per the release manifest)
 is:
