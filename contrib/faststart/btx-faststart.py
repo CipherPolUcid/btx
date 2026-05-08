@@ -367,10 +367,10 @@ def snapshot_from_args(args: argparse.Namespace) -> tuple[str, str | None, str, 
     # missing url' even though the snapshot file is sitting right next to
     # the manifest file.
     if not snapshot_url and snapshot_filename:
-        if is_url(resolved_manifest_source):
+        if is_url(manifest_source):
             # Manifest fetched from a URL. The snapshot lives at the same
             # base. Strip the manifest filename, append the snapshot filename.
-            manifest_base = resolved_manifest_source.rsplit("/", 1)[0]
+            manifest_base = manifest_source.rsplit("/", 1)[0]
             snapshot_url = f"{manifest_base}/{snapshot_filename}"
         else:
             # Local manifest file. Look for the snapshot in the same dir.
