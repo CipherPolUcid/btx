@@ -64,6 +64,84 @@ If CUDA runtime probing succeeds, the output will report:
 For current CUDA runtime defaults, pool behavior, and optimization notes, see
 `btx-cuda-matmul-optimization-notes-2026-04-13.md`.
 
+## Tuning the Metal MatMul accelerator (`BTX_MATMUL_*` environment variables)
+
+On Apple Silicon, the MatMul mining / accelerated-solve paths are tuned by
+environment variables rather than `btxd` command-line flags. They are read
+directly inside `src/matmul/`, `src/metal/`, and `src/pow.cpp`; none appear
+in `btxd -?`. Defaults work for most operators, but they are mostly
+auto-tuned from backend and host heuristics rather than fixed constants. On
+Apple Silicon, conservative hosts can still resolve to a single solver
+thread by default, while higher-performance Macs fan out more aggressively.
+This section lists the operationally relevant ones for the Metal backend; for
+the complete inventory, search the source tree for `getenv("BTX_MATMUL_`.
+CUDA-specific tuning knobs are documented separately.
+
+These knobs affect mining throughput and accelerator diagnostics; consensus
+Phase 2 validation still falls back to the CPU-canonical path. After setting
+any variable, restart `btxd`. To inspect how the current tree would resolve a
+backend request, use:
+
+```bash
+btx-matmul-backend-info --backend metal
+```
+
+### Backend selection
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `BTX_MATMUL_BACKEND` | Select accelerator backend: `cpu`, `metal`, `mlx`, or `cuda`. (`mlx` is an alias for `metal`.) | Platform default: `metal` on Apple, `cpu` elsewhere. |
+
+### Mining throughput (`SolveMatMul`)
+
+These govern how many in-flight matmul solves the daemon runs in parallel
+during `generatetoaddress` / `getblocktemplate` mining. On current `main`,
+the active Metal policy auto-tunes several of these when unset instead of
+using fixed constants.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `BTX_MATMUL_SOLVER_THREADS` | Number of parallel solver threads inside a single `SolveMatMul` call. Triggers the `SolveMatMulParallel` path in `src/pow.cpp` when `> 1`. | Auto-tuned by backend/host heuristics when unset. |
+| `BTX_MATMUL_PREPARE_WORKERS` | Number of workers that prepare next-window inputs ahead of the solve. | Auto-tuned from host/backend heuristics when unset. |
+| `BTX_MATMUL_PREPARE_PREFETCH_DEPTH` | How many windows ahead the prepare workers stage. Trades memory for steady-state throughput. | Backend-specific; usually small single digits. |
+| `BTX_MATMUL_SOLVE_BATCH_SIZE` | Batch size submitted to the accelerated solver per call. | Backend-specific. |
+| `BTX_MATMUL_PIPELINE_ASYNC` | Set to `1` to enable asynchronous pipelining of prepare and solve stages. | On for Metal when unset. |
+
+A reasonable starting point on an Apple Silicon workstation with the Metal
+backend active:
+
+```bash
+export BTX_MATMUL_SOLVER_THREADS=8
+export BTX_MATMUL_PIPELINE_ASYNC=1
+btxd -daemon
+```
+
+### Metal-specific knobs (Apple Silicon)
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `BTX_MATMUL_METAL_POOL_SLOTS` | Number of Metal command-buffer slots in the in-flight pool. Increase to overlap more solves on the GPU; decrease to cap GPU memory pressure. | Auto-tuned from solver-thread / Apple perf-level heuristics when unset. |
+| `BTX_MATMUL_METAL_PIPELINE` | Select the Metal transcript pipeline mode (`auto`, `legacy`, `fused`). | Backend-default. |
+| `BTX_MATMUL_METAL_FUNCTION_CONSTANTS` | Override Metal function-constant specialization for transcript kernels. | Backend-default. |
+| `BTX_MATMUL_GPU_INPUTS` | Set to `1` to generate matmul inputs on the GPU instead of the CPU before the solve. Saves a CPU↔GPU copy at the cost of additional GPU compute. | Backend-decided. |
+| `BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE` | Override Apple Silicon perf-level-0 logical CPU count used in launch-rate tuning heuristics. Useful for benchmarking on machines whose reported perf-level partitions differ from the host's actual sustained-throughput core count. | Auto-detected. |
+
+### Diagnostic / special-purpose knobs
+
+Safe to leave unset. Useful when investigating a regression, comparing
+backends, or changing guard-rail behavior on a dedicated mining host.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `BTX_MATMUL_MEM_DIAG` | Logs per-solve memory and backend stats to `debug.log`. Verbose. | Off unless set. |
+| `BTX_MATMUL_DIAG_COMPARE_CPU_METAL` | Cross-checks Metal results against a CPU recompute. Adds latency; useful for backend-correctness investigation. | Off unless set. |
+| `BTX_MATMUL_CPU_CONFIRM` | Confirms an accelerated solve with a CPU recompute before accepting it. | On for Metal/CUDA when unset. |
+| `BTX_MATMUL_AMX_EXPERIMENT` | Apple AMX experimental matrix path (opt-in for benchmarking). | Off unless set. |
+| `BTX_MATMUL_BLOCKED_MULTIPLY_THREADS` | Threads for the blocked CPU matmul fallback. | Backend / host default when unset. |
+| `BTX_MATMUL_NOISE_PARALLEL` | Parallelism in the noise-generation stage. | Backend / host default when unset. |
+| `BTX_MATMUL_DIGEST_SLICE_SIZE` | Slice size for digest construction. | Backend default when unset. |
+| `BTX_MATMUL_TIP_WATCHER` | Enables the tip watcher during long solves. | On when unset. |
+
 ## Initial Block Download
 
 A new BTX node syncs the chain from peers via standard initial block download
