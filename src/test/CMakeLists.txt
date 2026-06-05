@@ -204,6 +204,7 @@ add_executable(test_btx
   smile2_wallet_bridge_tests.cpp
   smile2_adversarial_tests.cpp
   smile2_deep_adversarial_tests.cpp
+  smile2_monomial_challenge_tests.cpp
   smile2_extreme_adversarial_tests.cpp
   smile2_edge_case_tests.cpp
   smile2_comprehensive_gap_tests.cpp

@@ -9,69 +9,63 @@
 #include <serialize.h>
 
 #include <cstdint>
+#include <map>
 
 /**
  * Shielded-pool unshield (z->t egress) velocity cap — v0.31.1 defense-in-depth.
  *
- * Sits ALONGSIDE the turnstile (ShieldedPoolBalance, the net-supply firewall) and the C-002
- * per-tx value/serial bindings (soundness). Those make forgery non-constructible and bound total
- * loss; this bounds the RATE at which value can leave the pool, so a stolen spend key or a future
- * inner-proof regression becomes a slow, observable leak rather than an instant drain.
+ * Sits ALONGSIDE the turnstile (ShieldedPoolBalance, the net-supply firewall) and the C-002 per-tx
+ * value/serial bindings (soundness). Those make forgery non-constructible and bound total loss; this
+ * bounds the RATE at which value can leave the pool, so a stolen spend key or a future inner-proof
+ * regression becomes a slow, observable leak rather than an instant drain.
  *
- * Mechanism: a leaky bucket whose capacity and refill scale with the live shielded pool balance
- * (%-of-pool). Over any trailing window of W blocks at most cap_bps/10000 of the pool can be
- * unshielded; the bucket auto-scales as the pool grows, so it never needs retuning.
+ * Rule: over any trailing window of `window_blocks` blocks, the total net unshield value must not
+ * exceed `cap_bps`/10000 of the shielded pool balance. Implemented as a window SUM over a per-block
+ * net-egress log -- a pure function of recent egress, so it is trivially reorg-safe (Undo erases the
+ * one entry the connect added) and, because the log is persisted, pruning-safe and identical on every
+ * node. Deterministic: height, egress, pool, and params are the only inputs (no wall-clock, no I/O).
  *
- *   capacity B   = cap_bps/10000 * pool                 (max burst)
- *   refill   R   = B / W   per block                    (sustained rate; W full windows == one B/window)
- *   per block h: bucket = min(B, bucket + R*(h - last)); bucket -= net_unshield(h);
- *                reject the block if bucket < 0  ("shielded-unshield-velocity-exceeded").
- *
- * Reorg-safe by construction: Apply() returns the pre-update state so the caller can stash it in
- * block undo data and hand it back to Restore() on DisconnectBlock — no lossy inverse needed.
- * Consensus-deterministic: pool, height, and params are the only inputs; no wall-clock, no I/O.
- * Inert before nShieldedUnshieldVelocityActivationHeight (callers gate on it); self-serve unshield
- * does not exist before C-002 anyway.
+ * `net_egress` for a block is the block's net value leaving the pool: max(0, sum of value_balance),
+ * where value_balance>0 means value left the pool (an unshield) -- so shields in the same block offset
+ * unshields. Inert before the activation height (callers gate on it); self-serve unshield does not
+ * exist before C-002 anyway.
  */
 class ShieldedUnshieldVelocity
 {
 public:
-    struct Snapshot {
-        CAmount bucket{0};
-        int32_t last_height{-1};
-        bool initialized{false};
-        SERIALIZE_METHODS(Snapshot, obj) { READWRITE(obj.bucket, obj.last_height, obj.initialized); }
-    };
+    /** Capacity (max net unshield per window) at the given pool balance: cap_bps/10000 of the pool. */
+    static CAmount WindowCap(CAmount pool_balance, uint32_t cap_bps);
 
-    /** Capacity (max burst) at the given pool balance: cap_bps/10000 of the pool. */
-    static CAmount Capacity(CAmount pool_balance, uint32_t cap_bps);
-    /** Per-block refill: capacity / window_blocks (>=1 sat so the bucket is never fully starved). */
-    static CAmount RefillPerBlock(CAmount pool_balance, uint32_t cap_bps, uint32_t window_blocks);
+    /** Record block `height`'s net egress. Stores max(0, net_egress); 0 entries are kept so Undo and
+     *  the window boundary stay exact. */
+    void RecordBlock(int32_t height, CAmount net_egress);
 
-    /**
-     * Apply block `height` carrying `net_unshield` (sum of positive value_balance, i.e. value leaving
-     * the pool) against `pool_balance` (the pool balance at the start of this block). On first call
-     * the bucket initializes to full capacity. Returns the prior Snapshot (for undo) via `prev`.
-     * Returns false iff the velocity cap is exceeded (=> block invalid).
-     */
-    [[nodiscard]] bool Apply(int32_t height,
-                             CAmount net_unshield,
-                             CAmount pool_balance,
-                             uint32_t cap_bps,
-                             uint32_t window_blocks,
-                             Snapshot& prev);
+    /** Reverse RecordBlock for `height` (DisconnectBlock / reorg). */
+    void UndoBlock(int32_t height);
 
-    /** Restore the snapshot saved by a prior Apply() (DisconnectBlock / reorg). */
-    void Restore(const Snapshot& prev) { m_state = prev; }
+    /** Total net egress over the trailing window ending at and including `tip_height`:
+     *  sum of entries with (tip_height - window_blocks) < h <= tip_height. */
+    [[nodiscard]] CAmount WindowTotal(int32_t tip_height, uint32_t window_blocks) const;
 
-    /** Load/persist the running state. */
-    void SetSnapshot(const Snapshot& s) { m_state = s; }
-    [[nodiscard]] Snapshot GetSnapshot() const { return m_state; }
+    /** Whether connecting block `tip_height` (already recorded) keeps the window within the cap. */
+    [[nodiscard]] bool WithinCap(int32_t tip_height, CAmount pool_balance,
+                                 uint32_t cap_bps, uint32_t window_blocks) const
+    {
+        return WindowTotal(tip_height, window_blocks) <= WindowCap(pool_balance, cap_bps);
+    }
 
-    SERIALIZE_METHODS(ShieldedUnshieldVelocity, obj) { READWRITE(obj.m_state); }
+    /** Drop entries strictly below `keep_from_height` (bounds the persisted log). Keep a buffer below
+     *  the active window so reorgs up to the buffer depth can restore exactly. */
+    void Prune(int32_t keep_from_height);
+
+    [[nodiscard]] bool Empty() const { return m_egress.empty(); }
+    void Clear() { m_egress.clear(); }
+
+    SERIALIZE_METHODS(ShieldedUnshieldVelocity, obj) { READWRITE(obj.m_egress); }
 
 private:
-    Snapshot m_state;
+    // height -> net egress that left the pool in that block. Sorted for window summation.
+    std::map<int32_t, CAmount> m_egress;
 };
 
 #endif // BTX_SHIELDED_UNSHIELD_VELOCITY_H

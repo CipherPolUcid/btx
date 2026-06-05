@@ -4,8 +4,8 @@ BTX version 0.31.1 is now available from:
 
 This point release covers changes merged after BTX 0.31.0 was prepared on June
 4, 2026. It includes shielded restart improvements, updated wallet coinbase
-shielding defaults, shielded unshield velocity-cap infrastructure, and release
-tooling hardening.
+shielding defaults, shielded unshield velocity-cap enforcement, formal
+verification artifacts, and release tooling hardening.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -46,12 +46,19 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
   activation height by default (block 123,000 on mainnet, 0 on regtest). Test
   networks can override this floor with `-autoshieldcoinbaseminheight=<n>`.
 
-- The release adds `ShieldedUnshieldVelocity`, a shielded-pool unshield
-  velocity-cap accumulator and the related consensus parameters. The configured
-  window is 960 blocks with a 1000 bps cap, and the activation height is 130,000
-  on the configured networks. Unit coverage exercises capacity calculation,
-  refill behavior, exact reorg restore, and serialization. See
+- The release enforces `ShieldedUnshieldVelocity`, a shielded-pool unshield
+  velocity-cap consensus rule. The configured window is 960 blocks with a 1000
+  bps cap, and the activation height is 130,000 on the configured networks. The
+  running state is persisted with shielded state, restored exactly across reorgs,
+  and covered by unit tests plus `wallet_shielded_velocity_cap.py`. See
   `doc/btx-unshield-velocity-cap.md` for the operator and integration details.
+
+- A new `formal-verification/` suite documents the tiered shielded-pool proof
+  plan and reproducible Z3 checks. Tier 1 covers accounting and velocity-cap
+  invariants, Tier 2 covers verifier-relation algebra, and Tier 3 documents the
+  Module-SIS reduction. Each tier includes a `PROOFS.md`, and
+  `python3 formal-verification/run_all.py` runs the machine-checkable
+  obligations.
 
 - The auto-update installer has stricter shell cleanup guards, and release
   automation examples now point at the 0.31.1 artifacts.

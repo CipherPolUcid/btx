@@ -1005,6 +1005,10 @@ public:
             opts.shielded_matrict_disable_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedSpendPathRecoveryActivationHeight =
             opts.shielded_spend_path_recovery_activation_height.value_or(0);  // Activate at genesis for instant regtest
+        // v0.31.1 velocity cap: inert on regtest by default (so existing shielded tests are unaffected);
+        // a functional test lowers it via -regtestshieldedunshieldvelocityactivationheight to exercise it.
+        consensus.nShieldedUnshieldVelocityActivationHeight =
+            opts.shielded_unshield_velocity_activation_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedPQ128UpgradeHeight =
             opts.shielded_pq128_upgrade_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedSettlementAnchorMaturity = 6;

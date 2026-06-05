@@ -48,25 +48,37 @@ Unit tests (`src/test/shielded_unshield_velocity_tests.cpp`, green): capacity = 
 burst-to-capacity then reject; full-window refill; net-ingress neither consumes nor overfills;
 exact reorg restore; serialization round-trip.
 
-## Remaining integration (consensus wiring — the final step)
+## Consensus integration — IMPLEMENTED
 
-The accumulator is done and tested; wiring it into block connection is the last piece:
+The rule is implemented as a window SUM over a persisted per-block net-egress log (chosen over the
+leaky bucket precisely because it is a pure function of recent egress, hence trivially reorg-safe):
 
-1. **Member.** Add `ShieldedUnshieldVelocity m_shielded_unshield_velocity` to `ChainstateManager`,
-   beside `m_shielded_pool_balance`. Persist its `Snapshot` with the shielded state (same record that
-   carries the pool balance), and rebuild/restore it the same way on load and reorg.
-2. **ConnectBlock** (`validation.cpp` ~6117, where per-bundle `value_balance` is summed into
-   `next_pool_balance`): accumulate `block_value_balance += *value_balance`. After the bundle loop, if
-   `consensus.IsShieldedUnshieldVelocityCapActive(pindex->nHeight)`, call
-   `Apply(nHeight, block_value_balance, pool_balance_at_block_start, cap_bps, window, prev)`; on
-   `false`, `state.Invalid(BLOCK_CONSENSUS, "shielded-unshield-velocity-exceeded")`. Stash `prev` for undo.
-3. **DisconnectBlock** (`validation.cpp` ~5419, beside `UndoValueBalance`): `Restore(prev)` from the
-   saved snapshot.
-4. **Functional test:** regtest with the activation height lowered (add a `-con`-overridable opt
-   mirroring the other shielded activation heights), mine past activation, drive unshields up to the
-   cap (accept) and over it (reject `shielded-unshield-velocity-exceeded`), and reorg across a
-   capped block to confirm exact restore.
+1. **Member.** `ChainstateManager::m_shielded_unshield_velocity` (`validation.h`), beside
+   `m_shielded_pool_balance`.
+2. **ConnectBlock** (`validation.cpp`, at the shielded-state commit, before the pool-balance DB
+   write): block net egress = `max(0, pool_at_start - pool_at_end)` (the pool's net decrease this
+   block). When `IsShieldedUnshieldVelocityCapActive(nHeight)`: `RecordBlock`, reject with
+   `shielded-unshield-velocity-exceeded` if `!WithinCap(...)`, `Prune` to 2·window, persist via
+   `WriteUnshieldVelocity`, and commit the member alongside the pool balance.
+3. **DisconnectBlock** (`validation.cpp`, beside the pool rollback): `UndoBlock(nHeight)` erases the
+   block's entry exactly, then persists — exact reorg undo, no lossy inverse.
+4. **Persistence** (`NullifierSet`, `DB_UNSHIELD_VELOCITY` key): the log is persisted (not recomputed
+   from blocks a pruned node lacks), so every node — pruned or full — evaluates the rule identically.
+   Loaded at `EnsureShieldedStateInitialized` (`finish_success`).
+5. **Activation:** mainnet 130,000; networks default INT_MAX (inert); regtest overridable via
+   `-regtestshieldedunshieldvelocityactivationheight`.
 
-Because the rule is consensus and pruning-independent, the velocity snapshot must be **persisted**
-(not recomputed from blocks a pruned node may not have) so every node — pruned or full — evaluates it
-identically. The single-scalar `Snapshot` makes that cheap.
+### Tests (green)
+- `shielded_unshield_velocity_tests` (C++): window-cap %-of-pool + auto-scale, window sum + cap
+  enforcement, exclusive lower boundary, net-ingress records zero, exact reorg undo, prune, serialize.
+- `wallet_shielded_velocity_cap.py` (functional): cap active from genesis on regtest; autoshield
+  (pool grows -> never capped); restart reloads the persisted log + `verifychain`; reorg
+  (invalidate/reconsider) exercises `UndoBlock`; chain keeps advancing.
+
+### Known regtest limitation (rejection path)
+End-to-end *rejection* needs pool egress (an unshield), but self-serve z->t unshield is gated to the
+C-002 height (123,000), unreachable in regtest. So the cap-exceeded path is covered at the unit level
+(`window_sum_and_cap_enforcement` -> `WithinCap` returns false), which the ConnectBlock check calls
+directly. A full end-to-end rejection test will be runnable once C-002 activation is a regtest-
+lowerable consensus param (the existing `#10` TODO), which would also enable the C-002 cross-activation
+E2E.
